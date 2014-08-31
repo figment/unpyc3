@@ -1,5 +1,5 @@
 """
-Decompiler for Python3.2.
+Decompiler for Python3.3.
 Decompile a module or a function using the decompile() function
 
 >>> from unpyc3 import decompile
@@ -82,12 +82,13 @@ def read_code(stream):
     if magic != imp.get_magic(): 
         print("*** Warning: file has wrong magic number ***")
     stream.read(4) # Skip timestamp 
+    stream.read(4) # Skip rawsize
     return marshal.load(stream)
 
 def dec_module(path):
     if path.endswith(".py"):
         path = imp.cache_from_source(path)
-    elif not path.endswith(".pyc"):
+    elif not path.endswith(".pyc") and not path.endswith(".pyo"):
         raise ValueError("path must point to a .py or .pyc file")
     stream = open(path, "rb")
     code_obj = read_code(stream)
@@ -1578,7 +1579,11 @@ class SuiteDecompiler:
     # Function creation
 
     def MAKE_FUNCTION(self, addr, argc, is_closure=False):
-        code = Code(self.stack.pop().val, self.code)
+        testType = self.stack.pop().val
+        if isinstance(testType, str):
+            code = Code(self.stack.pop().val, self.code)
+        else:
+            code = Code(testType, self.code)
         closure = self.stack.pop() if is_closure else None
         defaults = self.stack.pop(argc & 0xFF)
         kwdefaults = {}
@@ -1822,9 +1827,13 @@ def test_suite():
     code.show()
     dec = SuiteDecompiler(code[0])
     dec.run()
-    dec.suite.display()
+    dec.suite.display(IndentString())
 
 
 if __name__ == "__main__":
-    print("testing...")
-    test_suite()
+    import sys
+    if len(sys.argv) == 1:
+        print("testing...")
+        test_suite()
+    else:
+        print(decompile(sys.argv[1]))
