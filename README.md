@@ -30,7 +30,7 @@ def foo(x, y, z=3, *args):
 >>>
 ```
 
-Unpyc3 is made of a single python module. Download unpyc3.py and try it now!
+Unpyc3 is made of a single python module. Download [unpyc3.py](https://github.com/figment/unpyc3/raw/master/unpyc3.py) and try it now!
 
 the unpyc3 module is able de decompile itself! (try import unpyc3; unpyc3.decompile(unpyc3)) so theorically I could just distribute the .pyc file.
 
