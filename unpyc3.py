@@ -634,6 +634,13 @@ class PyYield(PyExpr):
     def __str__(self):
         return "yield {}".format(self.value)
 
+class PyYieldFrom(PyExpr):
+    precedence = 1
+    def __init__(self, value):
+        self.value = value
+    def __str__(self):
+        return "yield from {}".format(self.value)
+
 class PyStarred(PyExpr):
     """Used in unpacking assigments"""
     precedence = 15
@@ -681,6 +688,9 @@ class PyStatement:
         istr = IndentString()
         self.display(istr)
         return str(istr)
+    def on_pop(self, dec):
+        dec.write("#ERROR: Unexpected context 'on_pop': pop on statement:  ")
+        #dec.write(str(self)) 
 
 class DocString(PyStatement):
     def __init__(self, string):
@@ -994,7 +1004,8 @@ class SuiteDecompiler:
             jaddr = jaddr[-1].jump()
         while stack:
             truthiness, addr, cond = stack[-1]
-            if jaddr < addr or jaddr == addr:
+            if jaddr == None: print("#ERROR: jaddr is None")
+            if jaddr == None or jaddr < addr or jaddr == addr:
                 break
             stack.pop()
             obj_maker = PyBooleanOr if truthiness else PyBooleanAnd
@@ -1052,7 +1063,7 @@ class SuiteDecompiler:
     def BREAK_LOOP(self, addr):
         self.write("break")
 
-    def CONTINUE_LOOP(self, addr):
+    def CONTINUE_LOOP(self, addr, *argv):
         self.write("continue")
     
     def SETUP_FINALLY(self, addr, delta):
@@ -1072,8 +1083,13 @@ class SuiteDecompiler:
         end_try = start_except[-1]
         d_try = SuiteDecompiler(addr[1], start_except[-1])
         d_try.run()
-        assert end_try.opcode == JUMP_FORWARD
-        end_addr = end_try[1] + end_try.arg
+        if end_try.opcode == JUMP_FORWARD:
+            end_addr = end_try[1] + end_try.arg
+        elif end_try.opcode == JUMP_ABSOLUTE:
+            end_addr = end_try.arg
+        else:
+            #print(repr(end_try.opcode))
+            assert end_try.opcode == JUMP_FORWARD
         stmt = TryStatement(d_try.suite)
         while start_except.opcode != END_FINALLY:
             if start_except.opcode == DUP_TOP:
@@ -1319,6 +1335,11 @@ class SuiteDecompiler:
         value = self.stack.pop()
         self.stack.push(PyYield(value))
     
+    def YIELD_FROM(self, addr):
+        value = self.stack.pop() # TODO:  from statement ?
+        value = self.stack.pop()
+        self.stack.push(PyYield(value))
+    
     def CALL_FUNCTION(self, addr, argc, have_var=False, have_kw=False):
         kw_argc = argc >> 8
         pos_argc = argc & 0xFF
@@ -1532,8 +1553,14 @@ class SuiteDecompiler:
             while end_false.opcode != RETURN_VALUE:
                 end_false = end_false[1]
             end_false = end_false[1]
+        elif end_true.opcode == BREAK_LOOP:
+            # likely in a loop in a try/except
+            end_false = jump_addr
         else:
-            raise Unknown
+            sys.stderr.write("#ERROR: Unexpected statement: {}\n".format(end_true))
+            self.write("#ERROR: Unexpected statement: {}\n".format(end_true))
+            #raise Unknown
+            end_false = None
         d_false = SuiteDecompiler(jump_addr, end_false)
         d_false.run()
         if not (d_true.stack or d_false.stack):
@@ -1554,8 +1581,13 @@ class SuiteDecompiler:
         return self.POP_JUMP_IF(addr, target, truthiness=True)
 
     def JUMP_ABSOLUTE(self, addr, target):
-        # print("*** JUMP ABSOLUTE ***", addr)
-        # return addr.jump()
+        #print("*** JUMP ABSOLUTE ***", addr)
+        #return addr.jump()
+        
+        # TODO: prints out unnecessary continues at end of loops
+        jump_addr = addr.jump()
+        if jump_addr[-1].opcode == SETUP_LOOP:
+            self.write("continue")
         pass
     
     #
@@ -1589,7 +1621,10 @@ class SuiteDecompiler:
         kwdefaults = {}
         for i in range(argc >> 8):
             k, v = self.stack.pop(2)
-            kwdefaults[k.name] = v
+            if isinstance(k,PyConst):
+                kwdefaults[str(k)] = v
+            else:
+                kwdefaults[k.name] = v
         func_maker = code_map.get(code.name, DefStatement)
         self.stack.push(func_maker(code, defaults, kwdefaults, closure))
     
@@ -1618,6 +1653,9 @@ class SuiteDecompiler:
         else:
             raise Unknown
 
+    def EXTENDED_ARG(self, addr, ext):
+        self.write("# ERROR: {} : {}".format(addr, ext) )
+        pass
 
 # Create unary operators types and opcode handlers
 for op, name, ptn, prec in unary_ops:
