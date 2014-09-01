@@ -1395,6 +1395,13 @@ class SuiteDecompiler:
         name = self.code.names[namei]
         level, fromlist = self.stack.pop(2)
         self.stack.push(ImportStatement(name, level, fromlist))
+        # special case check for import x.y.z as w syntax which uses
+        #  attributes and assignments and is difficult to workaround
+        i = 1
+        while addr[i].opcode == LOAD_ATTR: i = i + 1
+        if i > 1 and addr[i].opcode in (STORE_FAST,STORE_NAME):
+            return addr[i]        
+        return None
     
     def IMPORT_FROM(self, addr, namei):
         name = self.code.names[namei]
