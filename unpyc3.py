@@ -73,6 +73,11 @@ else_jump_opcodes = (
     SETUP_LOOP, RAISE_VARARGS
 )
 
+# These opcodes indicate for loop rather than while loop
+for_jump_opcodes = (
+    GET_ITER, FOR_ITER
+)
+
 def read_code(stream): 
     # This helper is needed in order for the PEP 302 emulation to 
     # correctly handle compiled files
@@ -94,7 +99,6 @@ def dec_module(path):
     code_obj = read_code(stream)
     code = Code(code_obj)
     return code.get_suite(include_declarations=False, look_for_docstring=True)
-
 
 def decompile(obj):
     """
@@ -168,7 +172,10 @@ class Stack:
         else:
             del self._counts[id(obj)]
     def pop1(self):
-        val = self._stack.pop()
+        if not self._stack:
+            val = PyConst('ERROR')
+        else:
+            val = self._stack.pop()
         self.set_count(val, self.get_count(val) - 1)
         return val
     def pop(self, count=None):
@@ -587,7 +594,19 @@ class PyLambda(PyExpr, FunctionDefinition):
     def __str__(self):
         suite = self.code.get_suite()
         params = ", ".join(self.getparams())
-        expr = suite[0].val[len("return "):]
+        if len(suite.statements) > 0:
+            def strip_return(val):
+                return val[len("return "):] if val.startswith('return') else val
+            if isinstance(suite[0],IfStatement) and len(suite.statements) == 2:
+                expr = "return {} if {} else {}".format(
+                    strip_return(str(suite[0].true_suite)),
+                    str(suite[0].cond),
+                    strip_return(str(suite[1]))
+                )
+            else:
+                expr = strip_return(str(suite[0]))
+        else:
+            expr = "None"
         return "lambda {}: {}".format(params, expr)
 
 class PyComp(PyExpr):
@@ -688,6 +707,12 @@ class PyStatement:
         istr = IndentString()
         self.display(istr)
         return str(istr)
+    def wrap(self, condition=True):       
+        if condition:
+            assert not condition
+            return "({})".format(self)
+        else:
+            return str(self)
     def on_pop(self, dec):
         dec.write("#ERROR: Unexpected context 'on_pop': pop on statement:  ")
         #dec.write(str(self)) 
@@ -742,8 +767,11 @@ class Unpack:
             dec.store(PyTuple(self.dests))
 
 class ImportStatement(PyStatement):
+    alias = ""
+    precedence = 100
     def __init__(self, name, level, fromlist):
         self.name = name
+        self.alias = name
         self.level = level
         self.fromlist = fromlist
         self.aslist = []
@@ -1053,12 +1081,70 @@ class SuiteDecompiler:
         val = self.stack.pop()
         val.store(self, dest)
 
+    def scan_to_first_jump_if(self, addr, end_addr):
+        i = 0
+        while 1:
+            cur_addr = addr[i]
+            if cur_addr == end_addr: 
+                break
+            elif cur_addr.opcode in pop_jump_if_opcodes:
+                return cur_addr
+            elif cur_addr.opcode in else_jump_opcodes:
+                break
+            elif cur_addr.opcode in for_jump_opcodes:
+                break
+            i = i + 1
+        return None
+        
+    def scan_for_final_jump(self, start_addr, end_addr):
+        i = 0
+        while 1:
+            cur_addr = end_addr[i]
+            if cur_addr == start_addr: 
+                break
+            elif cur_addr.opcode == JUMP_ABSOLUTE:
+                return cur_addr
+            elif cur_addr.opcode in else_jump_opcodes:
+                break
+            elif cur_addr.opcode in pop_jump_if_opcodes:
+                break                            
+            i = i - 1
+        return None
+                
     #
     # All opcode methods in CAPS below.
     #
-
+        
     def SETUP_LOOP(self, addr, delta):
-        pass
+        jump_addr = addr[1] + delta
+        end_addr = jump_addr[-1]
+        if end_addr.opcode == JUMP_ABSOLUTE: # while 1 ???
+            d_body = SuiteDecompiler(addr[1], end_addr)
+            while_stmt = WhileStatement(PyConst(True), d_body.suite)
+            d_body.stack.push(while_stmt)
+            d_body.run()
+            while_stmt.body = d_body.suite
+            self.suite.add_statement(while_stmt)
+            return jump_addr
+        elif end_addr.opcode == POP_BLOCK: # assume conditional
+            # scan to first jump
+            end_cond = self.scan_to_first_jump_if(addr[1], end_addr)
+            if end_cond:
+                # scan for conditional
+                d_cond = SuiteDecompiler(addr[1], end_cond)
+                #
+                d_cond.run()
+                cond = d_cond.stack.pop()
+                if end_cond.opcode == POP_JUMP_IF_TRUE:
+                    cond = PyNot(cond)
+                d_body = SuiteDecompiler(end_cond[1], end_addr)
+                while_stmt = WhileStatement(cond, d_body.suite)
+                d_body.stack.push(while_stmt)
+                d_body.run()
+                while_stmt.body = d_body.suite
+                self.suite.add_statement(while_stmt)
+                return jump_addr
+        return None
 
     def BREAK_LOOP(self, addr):
         self.write("break")
@@ -1225,7 +1311,7 @@ class SuiteDecompiler:
         self.store(name)
 
     def DELETE_DEREF(self, addr, i):
-        name = self.code.getderefname(i)
+        name = self.code.derefnames[i]
         if not self.code.iscellvar(i):
             self.code.declare_nonlocal(name)
         self.write("del {}", name)
@@ -1505,7 +1591,7 @@ class SuiteDecompiler:
                 jump_addr = jump_addr[-1]
         elif jump_addr[-1].opcode == SETUP_LOOP:
             # We are in a while-loop with nothing after the if-suite
-            jump_addr = jump_addr[-1].jump()[-2]
+            jump_addr = jump_addr[-1].jump()[-1]
         cond = self.stack.pop()
         if not addr.is_else_jump():
             self.push_popjump(truthiness, jump_addr, cond)
@@ -1546,7 +1632,7 @@ class SuiteDecompiler:
                 end_false = end_false.jump()[-1]
             elif end_false[-1].opcode == SETUP_LOOP:
                 # We are in a while-loop with nothing after the else-suite
-                end_false = end_false[-1].jump()[-2]
+                end_false = end_false[-1].jump()[-1]
         elif end_true.opcode == RETURN_VALUE:
             # find the next RETURN_VALUE
             end_false = jump_addr
@@ -1557,21 +1643,28 @@ class SuiteDecompiler:
             # likely in a loop in a try/except
             end_false = jump_addr
         else:
-            sys.stderr.write("#ERROR: Unexpected statement: {}\n".format(end_true))
-            self.write("#ERROR: Unexpected statement: {}\n".format(end_true))
+            # normal statement
+            import sys
+            #sys.stderr.write("#ERROR: Unexpected statement: {} | {} \n".format(end_true,end_true[-1]))
+            self.write("#ERROR: Unexpected statement: {} | {}\n".format(end_true,jump_addr, jump_addr[-1]))
             #raise Unknown
-            end_false = None
+            jump_addr = end_true[-2]
+            stmt = IfStatement(cond, d_true.suite, None)
+            self.suite.add_statement(stmt)
+            return jump_addr or self.END_NOW
         d_false = SuiteDecompiler(jump_addr, end_false)
         d_false.run()
-        if not (d_true.stack or d_false.stack):
-            stmt = IfStatement(cond, d_true.suite, d_false.suite)
-            self.suite.add_statement(stmt)
-        else:
+        if d_true.stack and d_false.stack:
             assert len(d_true.stack) == len(d_false.stack) == 1
+            #self.write("#ERROR: Unbalanced stacks {} != {}".format(len(d_true.stack),len(d_false.stack)))
             assert not (d_true.suite or d_false.suite)
+            # this happens in specific if else conditions with assigments
             true_expr = d_true.stack.pop()
             false_expr = d_false.stack.pop()
             self.stack.push(PyIfElse(cond, true_expr, false_expr))
+        else:
+            stmt = IfStatement(cond, d_true.suite, d_false.suite)
+            self.suite.add_statement(stmt)
         return end_false or self.END_NOW
 
     def POP_JUMP_IF_FALSE(self, addr, target):
@@ -1584,10 +1677,13 @@ class SuiteDecompiler:
         #print("*** JUMP ABSOLUTE ***", addr)
         #return addr.jump()
         
-        # TODO: prints out unnecessary continues at end of loops
+        # TODO: print out continue if not final jump
         jump_addr = addr.jump()
         if jump_addr[-1].opcode == SETUP_LOOP:
-            self.write("continue")
+            end_addr = jump_addr + jump_addr[-1].arg
+            last_jump = self.scan_for_final_jump(jump_addr, end_addr[-1])
+            if last_jump != addr:
+                self.write("continue")
         pass
     
     #
@@ -1621,10 +1717,10 @@ class SuiteDecompiler:
         kwdefaults = {}
         for i in range(argc >> 8):
             k, v = self.stack.pop(2)
-            if isinstance(k,PyConst):
-                kwdefaults[str(k)] = v
-            else:
+            if hasattr(k,'name'):
                 kwdefaults[k.name] = v
+            else:
+                kwdefaults[str(k)] = v
         func_maker = code_map.get(code.name, DefStatement)
         self.stack.push(func_maker(code, defaults, kwdefaults, closure))
     
@@ -1648,15 +1744,18 @@ class SuiteDecompiler:
             exception = self.stack.pop()
             self.write("raise {}", exception)
         elif argc == 2:
-            exc, from_exc = self.stack.pop()
-            self.write("raise {} from {}". exc, from_exc)
+            from_exc, exc = self.stack.pop(), self.stack.pop()
+            self.write("raise {} from {}".format(exc, from_exc))
         else:
             raise Unknown
 
     def EXTENDED_ARG(self, addr, ext):
         self.write("# ERROR: {} : {}".format(addr, ext) )
         pass
-
+        
+    def WITH_CLEANUP(self, addr, *args, **kwargs):
+         self.write("# ERROR: {} : {}".format(addr, args) )
+         pass
 # Create unary operators types and opcode handlers
 for op, name, ptn, prec in unary_ops:
     name = 'Py' + name
@@ -1688,190 +1787,10 @@ for op, name, ptn, prec, inplace_ptn in binary_ops:
             self.stack.push(tp(left, right))
         setattr(SuiteDecompiler, inplace_op, method)
 
-
-def test_suite():
-    def foo(x):
-        x = x*(f(x) + 1 - x[1])
-        x = (y, [z, t]), {1, 2, 3}
-        t = {1:[x, y], 3:'x'}
-        a.x.y, b[2] = b, a
-        t = 1 <= x < 2 < y
-        g(x, y + 1, x=12)
-        x = a and (b or c)
-        y = 1 if x else 2
-        z = 1 if not x else 2
-        a = b = 3
-        x[y.z] = a, b = u
-        if x:
-            f(x)
-            del x
-        else:
-            g(x)
-            h[y] = 3
-        if y:
-            foo()
-        if x:
-            a()
-            if z:
-                a1()
-            else:
-                a2()
-            b()
-        elif y:
-            b()
-        else:
-            c()
-        x = a and b or c
-        return "hello"
-    def foo1():
-        if a and ((b and c and d) or e or f) and g: g()
-        if a or (b and (c1 or c2) and d) or e: g()
-        if a and b or c: g()
-        if a or b and c: g()
-        if a and (b or c): g()
-    def foo1():
-        x = a and b or c
-        x = a and (b1 or b2) and c or c
-        x = (a and b) + (c or (not d and e))
-    def foo1():
-        def f(x, y=2):
-            return x + y if x else x - y
-        g = lambda x: x + 1
-    def foo1(x):
-        x += 2
-        x[3] *= 10
-    def foo1(x):
-        while f(x):
-            if x and y:
-                g(x)
-            else:
-                x + 2
-            x += f(x, y=2)
-        while a and b:
-            while c and d:
-                print(a, c)
-    def foo1(x):
-        for i in x:
-            print(i)
-        for a, b in x:
-            for c, (d, e) in a:
-                print(a + c)
-    def foo1(x):
-        for i in x:
-            if i == 2:
-                f()
-            else:
-                g()
-        for i in x:
-            if i:
-                break
-        while x:
-            if x:
-                f()
-    def foo():
-        try:
-            x = 1
-        except A:
-            x = 2
-        except B as b:
-            x = 3
-        try:
-            x = 2
-            y = 3
-        except A:
-            x = 5
-        finally:
-            z = 2
-        try:
-            frobz()
-        except:
-            bar()
-        finally:
-            frobn()
-    def foo1(fname):
-        with open(fname) as f:
-            for line in f:
-                print(line)
-        with x as y, s as t:
-            bar()
-    def foo1():
-        l = [x for x in y for z in x]
-        l1 = [x for x in y if f(x)]
-        s = {x + 1 for x, y in T}
-        d = {x: y for x, y in f(a)}
-    def foo1():
-        class A:
-            def f(self): return 1
-        class B(A, metaclass=MyType):
-            bar = 12
-            def __init__(self, x):
-                self.x = x
-    def foo1():
-        g = (x for x in y)
-        f(y - 2 for x in S for y in f(x))
-    def foo1():
-        def g(x):
-            for i in x:
-                yield f(i) + 2
-            a = yield 5
-            b = 1 + (yield 12)
-    def foo(x, y):
-        def f(z):
-            return z + x
-        def g(z):
-            global x
-            return z + x
-        def h(z):
-            nonlocal x
-            x = 12
-    def foo():
-        if a:
-            return
-        if b:
-            foo()
-            if c:
-                return
-    foo = SuiteDecompiler.POP_JUMP_IF
-    def foo1():
-        if a:
-            if b:
-                f()
-            elif c:
-                g()
-    def foo1():
-        if a:
-            if b:
-                f()
-        elif c:
-            g()
-    def foo():
-        assert a, b
-    def foo1():
-        assert a
-    def foo1():
-        raise
-    def foo():
-        @decorate
-        def f(): pass
-        @foo
-        @bar.baz(3)
-        class A: pass
-    def foo():
-        class B(A):
-            def foo(): pass
-            def bar(): pass
-    dis.dis(foo)
-    code = Code(foo.__code__)
-    code.show()
-    dec = SuiteDecompiler(code[0])
-    dec.run()
-    dec.suite.display(IndentString())
-
-
 if __name__ == "__main__":
     import sys
     if len(sys.argv) == 1:
-        print("testing...")
-        test_suite()
+        print('USAGE: {} <filename.pyc>'.format(sys.argv[0]))
     else:
         print(decompile(sys.argv[1]))
+ 
