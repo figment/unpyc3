@@ -172,10 +172,7 @@ class Stack:
         else:
             del self._counts[id(obj)]
     def pop1(self):
-        if not self._stack:
-            val = PyConst('ERROR')
-        else:
-            val = self._stack.pop()
+        val = self._stack.pop() if self._stack else PyConst('ERROR')
         self.set_count(val, self.get_count(val) - 1)
         return val
     def pop(self, count=None):
@@ -200,10 +197,15 @@ def code_walker(code):
     l = len(code)
     code = array('B', code)
     i = 0
+    extended_arg = 0
     while i < l:
         op = code[i]
         if op >= HAVE_ARGUMENT:
-            yield i, (op, code[i+1] + (code[i+2] << 8))
+            oparg = code[i+1] + code[i+2]*256 + extended_arg
+            extended_arg = 0
+            if op == EXTENDED_ARG:
+                extended_arg = oparg*65536        
+            yield i, (op, oparg)
             i += 3
         else:
             yield i, (op, None)
@@ -557,11 +559,12 @@ class PyCallFunction(PyExpr):
         return "{}({})".format(funcstr, ", ".join(args))
 
 class FunctionDefinition:
-    def __init__(self, code, defaults, kwdefaults, closure):
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
         self.code = code
         self.defaults = defaults
         self.kwdefaults = kwdefaults
         self.closure = closure
+        self.paramobjs = paramobjs
     def getparams(self):
         code_obj = self.code.code_obj
         l = code_obj.co_argcount
@@ -614,7 +617,7 @@ class PyComp(PyExpr):
     Abstraction for list, set, dict comprehensions and generator expressions
     """
     precedence = 16
-    def __init__(self, code, defaults, kwdefaults, closure):
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
         assert not defaults and not kwdefaults
         self.code = code
         code[0].change_instr(NOP)
@@ -643,7 +646,7 @@ class PyDictComp(PyComp):
 class PyGenExpr(PyComp):
     precedence = 16
     pattern = "({})"
-    def __init__(self, code, defaults, kwdefaults, closure):
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
         self.code = code
 
 class PyYield(PyExpr):
@@ -714,8 +717,8 @@ class PyStatement:
         else:
             return str(self)
     def on_pop(self, dec):
-        dec.write("#ERROR: Unexpected context 'on_pop': pop on statement:  ")
-        #dec.write(str(self)) 
+        #dec.write("#ERROR: Unexpected context 'on_pop': pop on statement:  ")
+        pass
 
 class DocString(PyStatement):
     def __init__(self, string):
@@ -753,6 +756,7 @@ class InPlaceOp(PyStatement):
         indent.write(self.pattern, self.left, self.right)
 
 class Unpack:
+    precedence = 50
     def __init__(self, val, length, star_index=None):
         self.val = val
         self.length = length
@@ -873,8 +877,8 @@ class DecorableStatement(PyStatement):
         self.decorators.append(f)
 
 class DefStatement(FunctionDefinition, DecorableStatement):
-    def __init__(self, code, defaults, kwdefaults, closure):
-        FunctionDefinition.__init__(self, code, defaults, kwdefaults, closure)
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
+        FunctionDefinition.__init__(self, code, defaults, kwdefaults, closure, paramobjs=[])
         DecorableStatement.__init__(self)
     def display_undecorated(self, indent):
         paramlist = ", ".join(self.getparams())
@@ -1290,9 +1294,11 @@ class SuiteDecompiler:
         name = self.code.varnames[var_num]
         self.stack.push(name)
 
+
     def STORE_FAST(self, addr, var_num):
         name = self.code.varnames[var_num]
         self.store(name)
+
 
     def DELETE_FAST(self, addr, var_num):
         name = self.code.varnames[var_num]
@@ -1353,6 +1359,7 @@ class SuiteDecompiler:
         expr = self.stack.pop()
         attrname = self.code.names[namei]
         self.stack.push(PyAttribute(expr, attrname))
+
     
     def STORE_ATTR(self, addr, namei):
         expr = self.stack.pop()
@@ -1709,16 +1716,22 @@ class SuiteDecompiler:
         else:
             code = Code(testType, self.code)
         closure = self.stack.pop() if is_closure else None
+        
+        # default argument objects in positional order 
         defaults = self.stack.pop(argc & 0xFF)
+        # pairs of name and default argument, with the name just below the object on the stack, for keyword-only parameters 
         kwdefaults = {}
-        for i in range(argc >> 8):
+        for i in range((argc >> 8) & 0xFF):
             k, v = self.stack.pop(2)
             if hasattr(k,'name'):
                 kwdefaults[k.name] = v
             else:
-                kwdefaults[str(k)] = v
+                kwdefaults[k] = v
+        # parameter annotation objects
+        paramobjs = self.stack.pop((argc >> 16) & 0x7FFF)
+        
         func_maker = code_map.get(code.name, DefStatement)
-        self.stack.push(func_maker(code, defaults, kwdefaults, closure))
+        self.stack.push(func_maker(code, defaults, kwdefaults, closure, paramobjs))
     
     def LOAD_CLOSURE(self, addr, i):
         # Push the varname.  It doesn't matter as it is not used for now.
@@ -1746,7 +1759,7 @@ class SuiteDecompiler:
             raise Unknown
 
     def EXTENDED_ARG(self, addr, ext):
-        self.write("# ERROR: {} : {}".format(addr, ext) )
+        #self.write("# ERROR: {} : {}".format(addr, ext) )
         pass
         
     def WITH_CLEANUP(self, addr, *args, **kwargs):
