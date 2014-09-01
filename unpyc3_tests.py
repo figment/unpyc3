@@ -233,6 +233,9 @@ class TestClass:
             else:
                 pw = pw + c                
             c = 1
+            
+    def test_func30():
+        result_set.update(((self._res_id_group_map.get(r, 0), r) for r in res_dict))
 
 if __name__ == "__main__":
     import unpyc3
