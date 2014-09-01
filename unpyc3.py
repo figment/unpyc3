@@ -1036,7 +1036,7 @@ class DecorableStatement(PyStatement):
 
 class DefStatement(FunctionDefinition, DecorableStatement):
     def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
-        FunctionDefinition.__init__(self, code, defaults, kwdefaults, closure, paramobjs=[])
+        FunctionDefinition.__init__(self, code, defaults, kwdefaults, closure, paramobjs)
         DecorableStatement.__init__(self)
 
     def display_undecorated(self, indent):
