@@ -1587,8 +1587,6 @@ class SuiteDecompiler:
             # But take care: for-loops in generator expression do
             # not end in POP_BLOCK, hence the test below.
             jump_addr = jump_addr.jump()
-            if jump_addr.opcode == POP_BLOCK:
-                jump_addr = jump_addr[-1]
         elif jump_addr[-1].opcode == SETUP_LOOP:
             # We are in a while-loop with nothing after the if-suite
             jump_addr = jump_addr[-1].jump()[-1]
@@ -1644,8 +1642,6 @@ class SuiteDecompiler:
             end_false = jump_addr
         else:
             # normal statement
-            import sys
-            #sys.stderr.write("#ERROR: Unexpected statement: {} | {} \n".format(end_true,end_true[-1]))
             self.write("#ERROR: Unexpected statement: {} | {}\n".format(end_true,jump_addr, jump_addr[-1]))
             #raise Unknown
             jump_addr = end_true[-2]
