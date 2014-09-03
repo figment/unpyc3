@@ -660,7 +660,7 @@ class PyCallFunction(PyExpr):
 
 
 class FunctionDefinition:
-    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs={}):
         self.code = code
         self.defaults = defaults
         self.kwdefaults = kwdefaults
@@ -670,16 +670,22 @@ class FunctionDefinition:
     def getparams(self):
         code_obj = self.code.code_obj
         l = code_obj.co_argcount
-        params = list(code_obj.co_varnames[:l])
+        params = list(code_obj.co_varnames[:l])   
         if self.defaults:
             for i, arg in enumerate(reversed(self.defaults)):
-                params[-i - 1] = "{}={}".format(params[-i - 1], arg)
+                name = params[-i - 1]
+                if name in self.paramobjs:
+                    params[-i - 1] = "{}:{}={}".format(name, self.paramobjs[name], arg)
+                else:
+                    params[-i - 1] = "{}={}".format(name, arg)
         kwcount = code_obj.co_kwonlyargcount
         kwparams = []
         if kwcount:
             for i in range(kwcount):
                 name = code_obj.co_varnames[l + i]
-                if name in self.kwdefaults:
+                if name in self.kwdefaults and name in self.paramobjs:
+                    kwparams.append("{}:{}={}".format(name, self.paramobjs[name], self.kwdefaults[name]))
+                elif name in self.kwdefaults:
                     kwparams.append("{}={}".format(name, self.kwdefaults[name]))
                 else:
                     kwparams.append(name)
@@ -692,8 +698,13 @@ class FunctionDefinition:
         params.extend(kwparams)
         if code_obj.co_flags & VARKEYWORDS:
             params.append("**" + code_obj.co_varnames[l])
+            
         return params
-
+        
+    def getreturn(self):
+        if self.paramobjs and 'return' in self.paramobjs:
+            return self.paramobjs['return']
+        return None
 
 class PyLambda(PyExpr, FunctionDefinition):
     precedence = 1
@@ -724,7 +735,7 @@ class PyComp(PyExpr):
     """
     precedence = 16
 
-    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs={}):
         assert not defaults and not kwdefaults
         self.code = code
         code[0].change_instr(NOP)
@@ -761,7 +772,7 @@ class PyGenExpr(PyComp):
     precedence = 16
     pattern = "({})"
 
-    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs={}):
         self.code = code
 
 
@@ -1035,13 +1046,17 @@ class DecorableStatement(PyStatement):
 
 
 class DefStatement(FunctionDefinition, DecorableStatement):
-    def __init__(self, code, defaults, kwdefaults, closure, paramobjs=[]):
+    def __init__(self, code, defaults, kwdefaults, closure, paramobjs={}):
         FunctionDefinition.__init__(self, code, defaults, kwdefaults, closure, paramobjs)
         DecorableStatement.__init__(self)
 
     def display_undecorated(self, indent):
         paramlist = ", ".join(self.getparams())
-        indent.write("def {}({}):", self.code.name, paramlist)
+        result = self.getreturn()
+        if result:
+            indent.write("def {}({}) -> {}:", self.code.name, paramlist, result)
+        else:
+            indent.write("def {}({}):", self.code.name, paramlist)
         # Assume that co_consts starts with None unless the function
         # has a docstring, in which case it starts with the docstring
         if self.code.consts[0] != PyConst(None):
@@ -1904,7 +1919,11 @@ class SuiteDecompiler:
         else:
             code = Code(testType, self.code)
         closure = self.stack.pop() if is_closure else None
-
+        # parameter annotation objects
+        paramobjs = {}
+        paramcount = (argc >> 16) & 0x7FFF
+        if paramcount:
+            paramobjs = dict(zip(self.stack.pop().val, self.stack.pop(paramcount - 1)))
         # default argument objects in positional order 
         defaults = self.stack.pop(argc & 0xFF)
         # pairs of name and default argument, with the name just below the object on the stack, for keyword-only parameters 
@@ -1913,11 +1932,10 @@ class SuiteDecompiler:
             k, v = self.stack.pop(2)
             if hasattr(k, 'name'):
                 kwdefaults[k.name] = v
+            elif hasattr(k, 'val'):
+                kwdefaults[k.val] = v
             else:
                 kwdefaults[str(k)] = v
-        # parameter annotation objects
-        paramobjs = self.stack.pop((argc >> 16) & 0x7FFF)
-
         func_maker = code_map.get(code.name, DefStatement)
         self.stack.push(func_maker(code, defaults, kwdefaults, closure, paramobjs))
 
