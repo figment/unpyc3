@@ -444,13 +444,15 @@ class PyTuple(PyExpr):
         valstr = [val.wrap(val.precedence <= self.precedence)
                   for val in self.values]
         if len(valstr) == 1:
-            return valstr[0] + ","
+            return '(' + valstr[0] + "," + ')'
         else:
-            return ", ".join(valstr)
+            return '(' + ", ".join(valstr) + ')'
 
     def __iter__(self):
         return iter(self.values)
 
+    def wrap(self, condition=True):
+        return str(self)
 
 class PyList(PyExpr):
     precedence = 16
